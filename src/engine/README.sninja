@@ -1,0 +1,88 @@
+This is the production C++23 engine, derived from the local Ninja snapshot:
+4e4df1e567eb3c1475a51af261cba2bfff60b4be.
+
+The upstream reference tree is not bundled. sninja is compiled from this
+engine; it does not invoke a separate Ninja executable to perform builds.
+Original Apache-2.0 notices and COPYING are preserved.
+
+Changes with behavioral/performance significance:
+* lexer.{cc,in.cc,h}, scan.h, manifest_path.h, manifest_parser.{cc,h}:
+  bounded SIMD runs and borrowed literal paths, deferred variable evaluation,
+  canonical path fast path with the original normalizer as fallback.
+* state.{cc,h}, object_arena.h: stable owning slabs, single-probe interning.
+* pointer_vector.h, graph.h: one inline pointer per graph adjacency; the layout
+  remains three machine words. Large lists grow by 1.5x to limit unused space.
+  Iterator consumers use inferred iterator types.
+* eval_env.{cc,h}: sorted compact bindings, switching to a hash table at 16
+  entries to avoid quadratic behavior in large scopes.
+* hash_map.h, disk_interface.{cc,h}: owning directory hash caches.
+* util.cc: C++23 resize_and_overwrite for direct Windows file reads, plus internal
+  stdio opens made non-inheritable at creation on Windows (CRT N mode) so async
+  process creation cannot race the old open-then-clear-inheritance sequence.
+* graph.cc: inline single-output scan cache and borrowed command input paths.
+  The CLI's conservative no-work probe reuses the output dirty cache, checks the
+  static DAG before logged leaf inputs, and avoids materializing dependency
+  adjacency for a proven no-op. Default API calls restore node state; CLI misses
+  can reuse physical stat results only when no dyndep can introduce producers.
+  Synthetic phony mtimes are rolled back, and cached missing leaves retain the
+  dirtiness invariant expected by the original scanner. Explain mode and
+  unsupported states use the complete engine. SNINJA_NOOP_PROBE=0 disables it.
+* subprocess.{h,win32.cc}, real_command_runner.cc: directly inheritable child
+  pipe endpoints, one shared NUL input handle, adaptive single-worker launch
+  pipeline preserving all parent-inheritable handles, acquire/release IOCP
+  publication, exact cancellation completion draining, and constant-time removal.
+  Captured output is moved into the build result. POSIX shares the movable
+  command/output interfaces but retains its original process backend.
+* metrics.{h,cc}: thread-safe registration, process launch/wait measurements.
+* deps_log.{h,cc}: bounded whole-block reads from the signature onward, avoiding
+  stdio tail refills; block-rounded storage is capped at 576 KiB. Partial legacy
+  version writes preserve original truncated-header diagnostics. Borrowed record
+  payloads, one-pass
+  ID validation, alignment-safe word reads and corruption recovery; compact
+  32-bit dependency IDs with header and array in one allocation, table views
+  surviving reallocation and explicitly rebound after recompaction, and owned
+  record cleanup. IDs are resolved directly into graph input slots; missing-deps
+  inspection also consumes the indexed view without temporary pointer arrays.
+  Reusable contiguous write records keep the same per-record flush boundaries
+  for the active append log. Recompaction buffers its private temporary file
+  and checks close errors before replacement. Retained dependency arrays are
+  remapped in place only after successful replacement, avoiding a second copy;
+  failed writes/replacements restore original node IDs and in-memory records.
+  SNINJA_RECOMPACT_FLUSH=1 restores per-record flushing during recompaction.
+  Recovery offsets and history counters are wide enough for large logs; Windows
+  Truncate uses _chsize_s without a narrowing long cast and opens non-inheritable
+  handles. A standalone sparse-file check covers actual recovery above 2 GiB.
+* ninja.cc: scheduling history is parsed only after a no-op proof misses, still
+  before the original scan so dyndep output ordering keeps its prior semantics.
+  Early flag exits skip unused default parallelism queries; help and continuing
+  commands retain the original default calculation.
+* build_log.cc: bounded integral from_chars parsing for ordinary fields with
+  the original CRT parsers as fallback for unusual spellings and overflow.
+  History lookups borrow output paths, allocating ownership only for new keys;
+  history and unique-entry counters are 64-bit.
+* clparser.{h,cc}: borrowed line views, allocation-free include-prefix matching,
+  filename-suffix checks and ASCII-insensitive system-path matching; include
+  strings are moved into the owning set.
+* includes_normalize-win32.cc: stream component comparisons and copy the
+  unmatched suffix directly, preserving empty final components. Already-normal
+  full drive paths avoid a second absolute-path conversion. UNC/unusual paths
+  retain the original conversion fallback.
+* subprocess.{h,win32.cc}: optional SNINJA_PROFILE_JOBS instrumentation reads
+  direct-child process times from handles without changing command lines.
+  The default build omits the trace storage and code.
+* status_test.cc: include the current status printer/build interfaces so the
+  previously unregistered status tests can run.
+
+Build source lists are shared by CMake and configure.py in cmake/engine-*.txt.
+Both default to dynamic Windows CRT linkage; configure.py --runtime static and
+CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded select static linkage explicitly.
+Static CRT has not shown a consistent startup advantage in the latest paired
+measurements and regressed some log rewrite workloads, so it remains optional.
+SNINJA_PCH (CMake) and configure.py --pch (Clang/MSVC) optionally precompile
+standard headers for this engine's own compilation, including bootstrap seeds.
+MSVC compiles getopt.c as C++ consistently with the CMake build.
+Generated lexer.cc and lexer.in.cc carry the same hand-maintained fast paths.
+Future lexer regeneration must retain those fast paths.
+
+The previous independent experiment is retained in src/core, src/simd and
+src/cli. Enable SNINJA_BUILD_LEGACY to build it; it is not the default engine.

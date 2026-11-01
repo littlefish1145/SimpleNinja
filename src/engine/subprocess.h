@@ -1,0 +1,211 @@
+// Copyright 2012 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef NINJA_SUBPROCESS_H_
+#define NINJA_SUBPROCESS_H_
+
+#include <string>
+#include <vector>
+#include <queue>
+#include <utility>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#ifdef SNINJA_PROFILE_JOBS
+#include <cstdint>
+#include <stdio.h>
+#endif
+#else
+#include <signal.h>
+#endif
+
+// ppoll() exists on FreeBSD, but only on newer versions.
+#ifdef __FreeBSD__
+#  include <sys/param.h>
+#  if defined USE_PPOLL && __FreeBSD_version < 1002000
+#    undef USE_PPOLL
+#  endif
+#endif
+
+#include "exit_status.h"
+
+/// Subprocess wraps a single async subprocess.  It is entirely
+/// passive: it expects the caller to notify it when its fds are ready
+/// for reading, as well as call Finish() to reap the child once done()
+/// is true.
+struct Subprocess {
+  ~Subprocess();
+
+  /// Returns ExitSuccess on successful process exit, ExitInterrupted if
+  /// the process was interrupted, ExitFailure if it otherwise failed.
+  ExitStatus Finish();
+
+  bool Done() const;
+
+  const std::string& GetOutput() const;
+  std::string TakeOutput() { return std::move(buf_); }
+
+ private:
+  Subprocess(bool use_console);
+  bool Start(struct SubprocessSet* set, std::string& command);
+  void OnPipeReady();
+
+  std::string buf_;
+
+#ifdef _WIN32
+  /// Set up pipe_ as the parent-side pipe of the subprocess; return the
+  /// other end of the pipe, usable in the child process.
+  HANDLE SetupPipe(HANDLE ioport);
+
+  HANDLE child_;
+  HANDLE pipe_;
+  OVERLAPPED overlapped_;
+  char overlapped_buf_[4 << 10];
+  bool is_reading_;
+  std::atomic<bool> startup_complete_{false};
+  // The consumer owns these flags. Pipe completion is deferred until the
+  // launch notification has acquired all fields published by the launcher.
+  bool launch_notified_ = true;
+  bool connect_seen_ = false;
+  unsigned cleanup_packets_ = 0;
+  size_t running_index_ = 0;
+#ifdef SNINJA_PROFILE_JOBS
+  struct JobTrace {
+    FILE* file = nullptr;
+    std::string command;
+    int64_t queued = 0;
+    int64_t started = 0;
+    int64_t create_begin = 0;
+    int64_t create_end = 0;
+    int64_t first_output = 0;
+    DWORD pid = 0;
+    bool asynchronous = false;
+  } trace_;
+  void WriteTrace(DWORD exit_code, bool has_process);
+#endif
+#else
+  /// The file descriptor that will be used in ppoll/pselect() for this process,
+  /// if any. Otherwise -1.
+  /// In non-console mode, this is the read-side of a pipe that was created
+  /// specifically for this subprocess. The write-side of the pipe is given to
+  /// the subprocess as combined stdout and stderr.
+  /// In console mode no pipe is created: fd_ is -1, and process termination is
+  /// detected using the SIGCHLD signal and waitpid(WNOHANG).
+  int fd_;
+  /// PID of the subprocess. Set to -1 when the subprocess is reaped.
+  pid_t pid_;
+  /// In POSIX platforms it is necessary to use waitpid(WNOHANG) to know whether
+  /// a certain subprocess has finished. This is done for terminal subprocesses.
+  /// However, this also causes the subprocess to be reaped before Finish() is
+  /// called, so we need to store the ExitStatus so that a later Finish()
+  /// invocation can return it.
+  ExitStatus exit_status_;
+
+  /// Call waitpid() on the subprocess with the provided options and update the
+  /// pid_ and exit_status_ fields.
+  /// Return a boolean indicating whether the subprocess has indeed terminated.
+  bool TryFinish(int waitpid_options);
+#endif
+  bool use_console_;
+
+  friend struct SubprocessSet;
+};
+
+/// SubprocessSet runs a ppoll/pselect() loop around a set of Subprocesses.
+/// DoWork() waits for any state change in subprocesses; finished_
+/// is a queue of subprocesses as they finish.
+struct SubprocessSet {
+  SubprocessSet();
+  ~SubprocessSet();
+
+  // The result of DoWork(), in increasing priority order. When several events happen at the same time, the highest value will be reported:
+  // NoWork: If there is no work to do, or if ppoll()/pselect() was interrupted by a spurious signal or returned an error.
+  // JobserverTokenAvailable: Indicates that a new job slot token is available from the jobserver queue.
+  //   This can only be returned if SetJobserverFD() has been called with a valid file descriptor.
+  // SubprocFinished: Indicates that at least one subprocess completed since the last call.
+  // Interrupted: Indicates that a user interrupt (SIGINT, SIGHUP or SIGTERM) has been detected.
+  enum class WorkResult {
+    NoWork,
+    JobserverTokenAvailable,
+    SubprocFinished,
+    Interrupted
+  };
+
+  Subprocess* Add(std::string command, bool use_console = false);
+  WorkResult DoWork();
+
+  Subprocess* NextFinished();
+  bool HasFinished() const { return !finished_.empty(); }
+  void Clear();
+
+  std::vector<Subprocess*> running_;
+  std::queue<Subprocess*> finished_;
+
+#ifdef _WIN32
+  static BOOL WINAPI NotifyInterrupted(DWORD dwCtrlType);
+  static HANDLE ioport_;
+  HANDLE nul_;
+  void SetAsyncLaunch(bool enabled) { async_launch_ = enabled; }
+ private:
+  struct LaunchRequest {
+    Subprocess* process;
+    std::string command;
+  };
+  void StartLauncher();
+  void StopLauncher();
+  bool async_launch_ = false;
+  bool launch_stop_ = false;
+  bool launcher_busy_ = false;  // Protected by launch_mutex_.
+  int64_t last_dispatch_end_ = 0;  // Consumer only.
+  std::mutex launch_mutex_;
+  std::condition_variable launch_condition_;
+  std::queue<LaunchRequest> launch_queue_;
+  std::thread launcher_;
+#ifdef SNINJA_PROFILE_JOBS
+  FILE* trace_file_ = nullptr;
+#endif
+ public:
+#else
+  static void SetInterruptedFlag(int signum);
+  static void SigChldHandler(int signo, siginfo_t* info, void* context);
+
+  /// Store the signal number that causes the interruption.
+  /// 0 if not interruption.
+  static volatile sig_atomic_t interrupted_;
+  /// Whether ninja should quit. Set on SIGINT, SIGTERM or SIGHUP reception.
+  static bool IsInterrupted() { return interrupted_ != 0; }
+  static void HandlePendingInterruption();
+
+  /// Initialized to 0 before ppoll/pselect().
+  /// Filled to 1 by SIGCHLD handler when a child process terminates.
+  static volatile sig_atomic_t s_sigchld_received;
+  void CheckConsoleProcessTerminated(WorkResult* work_result);
+
+  void SetJobserverFD(int fd) { jobserver_fd_ = fd; }
+
+  struct sigaction old_int_act_;
+  struct sigaction old_term_act_;
+  struct sigaction old_hup_act_;
+  struct sigaction old_chld_act_;
+  sigset_t old_mask_;
+
+  int jobserver_fd_ = -1;
+#endif
+};
+
+#endif  // NINJA_SUBPROCESS_H_

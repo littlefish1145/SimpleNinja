@@ -1,0 +1,10 @@
+#ifndef SNINJA_LOAD_STATUS_H_
+#define SNINJA_LOAD_STATUS_H_
+
+enum LoadStatus {
+  LOAD_NOT_FOUND,
+  LOAD_SUCCESS,
+  LOAD_ERROR,
+};
+
+#endif  // SNINJA_LOAD_STATUS_H_

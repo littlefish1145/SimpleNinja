@@ -1,0 +1,110 @@
+#ifndef SNINJA_EVAL_ENV_H_
+#define SNINJA_EVAL_ENV_H_
+
+#include <map>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
+struct Rule;
+
+/// An interface for a scope for variable (e.g. "$foo") lookups.
+struct Env {
+  virtual ~Env() = default;
+  virtual std::string LookupVariable(std::string_view var) = 0;
+};
+
+/// A tokenized string that contains variable references.
+/// Can be evaluated relative to an Env.
+struct EvalString {
+  /// @return The evaluated string with variable expanded using value found in
+  ///         environment @a env.
+  std::string Evaluate(Env* env) const;
+
+  /// @return The string with variables not expanded.
+  std::string Unparse() const;
+
+  void Clear() {
+    parsed_.clear();
+    single_token_.clear();
+  }
+  bool empty() const { return parsed_.empty() && single_token_.empty(); }
+
+  void AddText(std::string_view text);
+  void AddSpecial(std::string_view text);
+
+  /// Construct a human-readable representation of the parsed state,
+  /// for use in tests.
+  std::string Serialize() const;
+
+ private:
+  enum TokenType { RAW, SPECIAL };
+  typedef std::vector<std::pair<std::string, TokenType> > TokenList;
+  TokenList parsed_;
+
+  // If we hold only a single RAW token, then we keep it here instead of
+  // pushing it on TokenList. This saves a bunch of allocations for
+  // what is a common case. If parsed_ is nonempty, then this value
+  // must be ignored.
+  std::string single_token_;
+};
+
+/// An invocable build command and associated metadata (description, etc.).
+struct Rule {
+  explicit Rule(const std::string& name) : name_(name) {}
+
+  static std::unique_ptr<Rule> Phony();
+
+  bool IsPhony() const;
+
+  const std::string& name() const { return name_; }
+
+  void AddBinding(const std::string& key, const EvalString& val);
+
+  static bool IsReservedBinding(std::string_view var);
+
+  const EvalString* GetBinding(std::string_view key) const;
+
+ private:
+  // Allow the parsers to reach into this object and fill out its fields.
+  friend struct ManifestParser;
+
+  std::string name_;
+  typedef std::map<std::string, EvalString, std::less<>> Bindings;
+  Bindings bindings_;
+  bool phony_ = false;
+};
+
+/// An Env which contains a mapping of variables to values
+/// as well as a pointer to a parent scope.
+struct BindingEnv : public Env {
+  BindingEnv() : parent_(nullptr) {}
+  explicit BindingEnv(BindingEnv* parent) : parent_(parent) {}
+
+  ~BindingEnv() override = default;
+  std::string LookupVariable(std::string_view var) override;
+
+  void AddRule(std::unique_ptr<const Rule> rule);
+  const Rule* LookupRule(std::string_view rule_name);
+  const Rule* LookupRuleCurrentScope(std::string_view rule_name);
+  const std::map<std::string, std::unique_ptr<const Rule>, std::less<>>&
+  GetRules() const;
+
+  void AddBinding(const std::string& key, std::string_view val);
+
+  /// This is tricky.  Edges want lookup scope to go in this order:
+  /// 1) value set on edge itself (edge_->env_)
+  /// 2) value set on rule, with expansion in the edge's scope
+  /// 3) value set on enclosing scope of edge (edge_->env_->parent_)
+  /// This function takes as parameters the necessary info to do (2).
+  std::string LookupWithFallback(std::string_view var, const EvalString* eval,
+                                 Env* env);
+
+ private:
+  std::map<std::string, std::string, std::less<>> bindings_;
+  std::map<std::string, std::unique_ptr<const Rule>, std::less<>> rules_;
+  BindingEnv* parent_;
+};
+
+#endif  // SNINJA_EVAL_ENV_H_

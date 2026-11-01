@@ -1,0 +1,7 @@
+subprocess-win32.cc
+includes_normalize-win32.cc
+jobserver-win32.cc
+msvc_helper-win32.cc
+msvc_helper_main-win32.cc
+getopt.c
+minidump-win32.cc

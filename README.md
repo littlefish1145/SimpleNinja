@@ -36,14 +36,13 @@ python configure.py --bootstrap --verify
 .\build-bootstrap\sninja.exe -C path\to\project -t targets
 ```
 
-运行 `sninja --help` 查看命令行选项。兼容性范围与已知限制见 [项目状态](docs/STATUS.md)，性能测量方法及结果见 [性能文档](docs/PERFORMANCE.md)。
+运行 `sninja --help` 查看命令行选项。对照测试脚本需要自行提供原版 Ninja 可执行文件。兼容性范围与已知限制见 [项目状态](docs/STATUS.md)，性能测量方法及结果见 [性能文档](docs/PERFORMANCE.md)。
 
 ## 项目结构
 
 - `src/engine/`：生产构建引擎。
 - `configure.py`、`cmake/`：自举和 CMake 构建配置。
 - `tests/`、`scripts/`：测试、构建与性能工具。
-- `ninja/`：用于对照的原版 Ninja 源码快照。
 - `docs/`：开发、状态和性能记录。
 
 ## 许可与来源

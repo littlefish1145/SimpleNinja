@@ -1,0 +1,10 @@
+/build*/
+/__pycache__/
+/scripts/__pycache__/
+/DepsLogTest-tempfile
+/build_log_test.tmp
+/build_log_write_test.tmp
+/slow.obj
+/verify-build/
+/cancelled_active*
+/*.tempfile
